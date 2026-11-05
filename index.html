@@ -844,18 +844,14 @@
     position: relative; z-index: 1;
   }
 
-  /* Sparkles (reused from before) */
-  .sc-sparkle {
+  /* Party-popper confetti, drawn over the whole screen after the reveal */
+  .dc-confetti-canvas {
     position: fixed;
-    border-radius: 50%;
-    background: radial-gradient(circle, #f5e17a 0%, #b8923c 60%, transparent 100%);
+    inset: 0;
+    width: 100%;
+    height: 100%;
     pointer-events: none;
     z-index: 9999;
-    animation: sc-spark-out var(--dur, 0.8s) ease-out forwards;
-  }
-  @keyframes sc-spark-out {
-    0%   { transform: translate(0,0) scale(1); opacity: 1; }
-    100% { transform: translate(var(--tx), var(--ty)) scale(0); opacity: 0; }
   }
 
   /* ══════════════════════════════════════════════════
@@ -1888,7 +1884,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   /* ---------------- RSVP form ---------------- */
   const RSVP_URL = 'https://script.google.com/macros/s/AKfycbx8D50nwO51PJKbricL1_o4tN-GwczAPPssB4TzdnJY08xfrI9qEdbpsf0w4gB5Kn2U/exec';
-  document.getElementById('rsvpForm').addEventListener('submit', async (e) => {
+  document.getElementById('rsvpForm')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!RSVP_URL) return;
     const form = e.currentTarget;
@@ -1955,7 +1951,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (!card || !sc || !overlay) return;
 
-    const ctx = sc.getContext('2d');
+    const ctx = sc.getContext('2d', { willReadFrequently: true });
     let painted = false;
     let done    = false;
 
@@ -2041,7 +2037,13 @@ document.addEventListener('DOMContentLoaded', () => {
     let rTimer;
     window.addEventListener('resize', () => {
       clearTimeout(rTimer);
-      rTimer = setTimeout(() => { if (!done) { painted = false; tryPaint(); } }, 200);
+      rTimer = setTimeout(() => {
+        // Keep scratch progress when only the mobile address bar changed the viewport.
+        if (!done && (card.offsetWidth !== sc.width || card.offsetHeight !== sc.height)) {
+          painted = false;
+          tryPaint();
+        }
+      }, 200);
     });
 
     /* ── Erase brush ────────────────────────────────────── */
@@ -2071,6 +2073,21 @@ document.addEventListener('DOMContentLoaded', () => {
       ctx.fill();
     }
 
+    // Fill the gap between pointer samples so fast swipes leave a continuous stroke.
+    let last = null;
+    function scratchTo(clientX, clientY) {
+      if (last) {
+        const dist  = Math.hypot(clientX - last.x, clientY - last.y);
+        const steps = Math.floor(dist / (BRUSH / 3));
+        for (let i = 1; i <= steps; i++) {
+          const t = i / (steps + 1);
+          erase(last.x + (clientX - last.x) * t, last.y + (clientY - last.y) * t);
+        }
+      }
+      erase(clientX, clientY);
+      last = { x: clientX, y: clientY };
+    }
+
     /* ── Threshold check ────────────────────────────────── */
     let checking = false;
     function scheduleCheck() {
@@ -2096,30 +2113,111 @@ document.addEventListener('DOMContentLoaded', () => {
       if (hint) hint.classList.add('dc-hint-gone');
       content.classList.add('dc-revealed');
       if (window.lucide) lucide.createIcons();
-      spawnSparkles();
+      firePopper();
     }
 
-    /* ── Sparkles ───────────────────────────────────────── */
-    function spawnSparkles() {
-      const rect = card.getBoundingClientRect();
-      const cx = rect.left + rect.width  / 2;
-      const cy = rect.top  + rect.height / 2;
-      for (let i = 0; i < 22; i++) {
-        const angle = (i / 22) * Math.PI * 2 + (Math.random() - 0.5) * 0.7;
-        const dist  = 40 + Math.random() * 80;
-        const size  = (3 + Math.random() * 4).toFixed(1);
-        const el    = document.createElement('span');
-        el.className = 'sc-sparkle';
-        el.style.cssText =
-          `left:${cx}px;top:${cy}px;width:${size}px;height:${size}px;` +
-          `margin-left:-${size/2}px;margin-top:-${size/2}px;` +
-          `--tx:${(Math.cos(angle)*dist).toFixed(1)}px;` +
-          `--ty:${(Math.sin(angle)*dist).toFixed(1)}px;` +
-          `--dur:${(0.5 + Math.random()*0.6).toFixed(2)}s;` +
-          `animation-delay:${(Math.random()*0.25).toFixed(2)}s;`;
-        document.body.appendChild(el);
-        setTimeout(() => el.remove(), 1400);
+    /* ── Party popper ───────────────────────────────────── */
+    // Two cannons at the card's lower corners shoot confetti up and inward;
+    // it then slows, flutters and falls under gravity.
+    function firePopper() {
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+      const fx  = document.createElement('canvas');
+      fx.className = 'dc-confetti-canvas';
+      fx.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(fx);
+
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const VW = window.innerWidth, VH = window.innerHeight;
+      fx.width  = VW * dpr;
+      fx.height = VH * dpr;
+      const c = fx.getContext('2d');
+      c.scale(dpr, dpr);
+
+      const COLORS = ['#E7C878', '#C69A3A', '#FFF3C9', '#8B1E3F', '#D9627A', '#F7D9A8', '#FFFFFF'];
+      const rand = (a, b) => a + Math.random() * (b - a);
+      const pieces = [];
+
+      function burst(x, y, aim, count) {
+        for (let i = 0; i < count; i++) {
+          const angle = aim + rand(-0.5, 0.5);
+          const speed = rand(0.012, 0.036) * Math.max(VH, 560);
+          pieces.push({
+            x, y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            w: rand(5, 10),
+            h: rand(3, 7),
+            shape: Math.random() < 0.2 ? 'circle' : Math.random() < 0.3 ? 'streamer' : 'rect',
+            color: COLORS[Math.floor(Math.random() * COLORS.length)],
+            spin: rand(0, Math.PI * 2),
+            spinV: rand(-0.3, 0.3),
+            flip: rand(0, Math.PI * 2),
+            flipV: rand(0.1, 0.3),
+            sway: rand(0, Math.PI * 2),
+            age: 0,
+            life: rand(130, 200)
+          });
+        }
       }
+
+      const rect = card.getBoundingClientRect();
+      const left   = Math.max(rect.left + 10, 10);
+      const right  = Math.min(rect.right - 10, VW - 10);
+      const bottom = Math.min(rect.bottom - 10, VH - 10);
+      const UP = -Math.PI / 2;
+
+      burst(left,  bottom, UP + 0.45, 90);
+      burst(right, bottom, UP - 0.45, 90);
+      // A smaller follow-up pop keeps the shower going a little longer.
+      setTimeout(() => {
+        burst(left,  bottom, UP + 0.3, 40);
+        burst(right, bottom, UP - 0.3, 40);
+      }, 180);
+
+      let prev = performance.now();
+      const startedAt = prev;
+      (function frame(now) {
+        const dt = Math.min((now - prev) / 16.67, 3); // 1 = one frame at 60 fps
+        prev = now;
+        c.clearRect(0, 0, VW, VH);
+
+        for (let i = pieces.length - 1; i >= 0; i--) {
+          const p = pieces[i];
+          p.age += dt;
+          if (p.age > p.life || p.y > VH + 30) { pieces.splice(i, 1); continue; }
+
+          const drag = Math.pow(0.965, dt);
+          p.vx *= drag;
+          p.vy = p.vy * drag + 0.2 * dt;
+          p.sway += 0.08 * dt;
+          p.x += (p.vx + Math.sin(p.sway) * 0.9) * dt;
+          p.y += p.vy * dt;
+          p.spin += p.spinV * dt;
+          p.flip += p.flipV * dt;
+
+          c.save();
+          c.globalAlpha = Math.min(1, (p.life - p.age) / 35);
+          c.translate(p.x, p.y);
+          c.rotate(p.spin);
+          c.scale(1, Math.cos(p.flip)); // edge-on flip makes paper look 3D
+          c.fillStyle = p.color;
+          if (p.shape === 'circle') {
+            c.beginPath();
+            c.arc(0, 0, p.h / 2 + 1, 0, Math.PI * 2);
+            c.fill();
+          } else if (p.shape === 'streamer') {
+            c.fillRect(-1.5, -p.w * 1.3, 3, p.w * 2.6);
+          } else {
+            c.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+          }
+          c.restore();
+        }
+
+        // The follow-up pop arrives at 180 ms, so don't stop before then.
+        if (pieces.length || now - startedAt < 300) requestAnimationFrame(frame);
+        else fx.remove();
+      })(prev);
     }
 
     /* ── Events ─────────────────────────────────────────── */
@@ -2130,14 +2228,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!painted) { tryPaint(); return; }
       e.preventDefault();
       active = true;
+      last = null;
+      if (hint) hint.classList.add('dc-hint-gone');
       const s = e.touches ? e.touches[0] : e;
-      erase(s.clientX, s.clientY);
+      scratchTo(s.clientX, s.clientY);
     }
     function onMove(e) {
       if (!active || done) return;
       e.preventDefault();
       const s = e.touches ? e.touches[0] : e;
-      erase(s.clientX, s.clientY);
+      scratchTo(s.clientX, s.clientY);
       scheduleCheck();
     }
     function onEnd() { active = false; }
